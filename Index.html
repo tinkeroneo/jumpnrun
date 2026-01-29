@@ -649,4 +649,201 @@
           if (!stillMove) clearMove();
         } else {
           let stillJump = false;
-          for (const v of activePointers.values()) if (v.zone === "jum
+          for (const v of activePointers.values()) if (v.zone === "jump") { stillJump = true; break; }
+          if (!stillJump) clearJump();
+        }
+      };
+
+      el.addEventListener("pointerup", (e) => { e.preventDefault(); endPointer(e); }, { passive:false });
+      el.addEventListener("pointercancel", endPointer);
+      el.addEventListener("lostpointercapture", endPointer);
+    }
+
+    bindZone(els.zoneMove, "move");
+    bindZone(els.zoneJump, "jump");
+
+    window.addEventListener("blur", () => { clearMove(); clearJump(); activePointers.clear(); });
+  }
+
+  // ===== Loop =====
+  let last = performance.now();
+
+  function tick(){
+    const now = performance.now();
+    let dt = (now - last) / 1000;
+    last = now;
+    dt = Math.min(dt, CFG.dtClamp);
+
+    const left = down("left");
+    const right = down("right");
+    const jumpDown = down("jump");
+    const jumpPressed = jumpDown && !player.jumpWasDown;
+    player.jumpWasDown = jumpDown;
+
+    if (jumpPressed && meta.timeToFirstJumpMs === null){
+      meta.timeToFirstJumpMs = now - meta.t0;
+    }
+
+    // accel
+    let ax = 0;
+    if (left) ax -= CFG.moveAcc;
+    if (right) ax += CFG.moveAcc;
+
+    const control = player.onGround ? 1.0 : CFG.airControl;
+    player.vx += ax * control * dt;
+
+    // friction
+    if (!left && !right){
+      const fr = CFG.friction * (player.onGround ? 1.0 : 0.25);
+      if (player.vx > 0) player.vx = Math.max(0, player.vx - fr * dt);
+      else if (player.vx < 0) player.vx = Math.min(0, player.vx + fr * dt);
+    }
+
+    player.vx = clamp(player.vx, -CFG.maxSpeed, CFG.maxSpeed);
+
+    // jump
+    if (jumpPressed && player.onGround && !meta.completed){
+      player.vy = -CFG.jumpVel;
+      meta.jumpCount += 1;
+    }
+
+    // gravity
+    player.vy += CFG.gravity * dt;
+
+    if (!meta.completed) moveAndCollide(dt);
+
+    // camera follow
+    const targetCamX = clamp(player.x + player.w/2 - canvas.width/2, 0, 960 - canvas.width);
+    pushCamTarget(targetCamX, 0);
+
+    processQueues(now);
+
+    cam.x += (cam.tx - cam.x) * 0.12;
+    cam.y += (cam.ty - cam.y) * 0.12;
+
+    renderHUD();
+    renderDebug(now);
+    render();
+
+    requestAnimationFrame(tick);
+  }
+
+  // ===== Render =====
+  function render(){
+    ctx.fillStyle = "#0f1321";
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    const ox = -cam.x, oy = -cam.y;
+
+    // grid
+    ctx.save();
+    ctx.globalAlpha = 0.06;
+    ctx.strokeStyle = "#8aa0ff";
+    ctx.lineWidth = 1;
+    for (let x = 0; x <= 960; x += CFG.tile){
+      ctx.beginPath();
+      ctx.moveTo(x + ox*0.25, 0);
+      ctx.lineTo(x + ox*0.25, 540);
+      ctx.stroke();
+    }
+    for (let y = 0; y <= 540; y += CFG.tile){
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(960, y);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // solids
+    ctx.fillStyle = "#182044";
+    for (const s of world.solids){
+      ctx.fillRect(s.x + ox, s.y + oy, s.w, s.h);
+    }
+
+    // spikes
+    ctx.fillStyle = "#3a1630";
+    for (const sp of world.spikes){
+      ctx.fillRect(sp.x + ox, sp.y + oy, sp.w, sp.h);
+      ctx.globalAlpha = 0.55;
+      ctx.fillStyle = "#ff8aa1";
+      for (let x = sp.x; x < sp.x + sp.w; x += 10){
+        ctx.beginPath();
+        ctx.moveTo(x + ox, sp.y + oy + sp.h);
+        ctx.lineTo(x + ox + 5, sp.y + oy);
+        ctx.lineTo(x + ox + 10, sp.y + oy + sp.h);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = "#3a1630";
+    }
+
+    // goal
+    ctx.fillStyle = meta.completed ? "#2a7bff" : "#1a2140";
+    ctx.fillRect(world.goal.x + ox, world.goal.y + oy, world.goal.w, world.goal.h);
+    ctx.strokeStyle = "#cdd7f5";
+    ctx.globalAlpha = 0.25;
+    ctx.strokeRect(world.goal.x + ox, world.goal.y + oy, world.goal.w, world.goal.h);
+    ctx.globalAlpha = 1;
+
+    // hint text (small, unobtrusive)
+    ctx.globalAlpha = 0.75;
+    ctx.fillStyle = "#aab6da";
+    ctx.font = "14px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+    ctx.fillText(world.hint, 14, 24);
+    ctx.globalAlpha = 1;
+
+    // perceived ground glow (delayed)
+    if (player.perceivedOnGround){
+      ctx.globalAlpha = 0.22;
+      ctx.fillStyle = "#6ee7a8";
+      ctx.fillRect(player.x + ox - 4, player.y + oy + player.h + 2, player.w + 8, 4);
+      ctx.globalAlpha = 1;
+    }
+
+    // player
+    ctx.fillStyle = "#e9eefc";
+    ctx.fillRect(player.x + ox, player.y + oy, player.w, player.h);
+    ctx.fillStyle = "#0b0d12";
+    ctx.globalAlpha = 0.8;
+    ctx.fillRect(player.x + ox + player.w - 8, player.y + oy + 10, 4, 4);
+    ctx.globalAlpha = 1;
+  }
+
+  function renderDebug(now){
+    const t = now - meta.t0;
+    const jps = meta.jumpCount / Math.max(1, t/1000);
+    els.debug.textContent =
+      `Level ${LEVELS[levelIndex].name} · ` +
+      `perceivedGround: ${player.perceivedOnGround} / realGround: ${player.realOnGround} · ` +
+      `pos: (${player.x.toFixed(0)},${player.y.toFixed(0)}) vel: (${player.vx.toFixed(0)},${player.vy.toFixed(0)}) · ` +
+      `delay: ${CFG.delayEnabled ? CFG.feedbackDelayMs+"ms" : "off"} · ` +
+      `jps: ${jps.toFixed(2)} · zögern: ${(meta.hesitationMs/1000).toFixed(2)}s`;
+  }
+
+  // ===== UI =====
+  els.btnReset.addEventListener("click", () => resetLevel(false));
+  els.btnInfo.addEventListener("click", () => {
+    els.sheet.classList.toggle("open");
+  });
+  els.sheetHandle.addEventListener("click", () => {
+    els.sheet.classList.toggle("open");
+  });
+  els.btnDelay.addEventListener("click", () => {
+    CFG.delayEnabled = !CFG.delayEnabled;
+    feedbackQueue.length = 0;
+    camQueue.length = 0;
+    if (!CFG.delayEnabled) player.perceivedOnGround = player.realOnGround;
+    renderHUD();
+  });
+
+  // ===== Init =====
+  enableTouchZones();
+  loadLevel(0);
+  renderHUD();
+  requestAnimationFrame(tick);
+
+})();
+</script>
+</body>
+</html>
